@@ -1,0 +1,42 @@
+// Cloud Exfiltration Hunt
+#repo="base_sensor"
+#event_simpleName=/^(NetworkConnectIP4|DnsRequest|ProcessRollup2|FileWritten)$/ // Modify as needed
+// Filter early using tag fields for best performance
+| case {
+    // DNS-based detection
+    #event_simpleName=DnsRequest RemoteDnsDomain=/.*(dropbox|gdrive|googledrive|onedrive|icloud|mega|box|pcloud|sync\.com).*/i // Modify as needed
+    | Activity := "DNS Lookup"
+    | ReadableTime := formatTime("%Y-%m-%dT%H:%M:%S", field=@timestamp)
+    | Details := format("%s - %s", field=[ReadableTime, DnsRequestName]);
+    
+    // Process-based detection
+    #event_simpleName=ProcessRollup2 ImageFileName=/.*(Dropbox|GoogleDrive|OneDrive|iCloudDrive|Mega|Box|PCloud|SyncClient)\.exe/i // Modify as needed
+    | Activity := "Cloud Sync Process"
+    | ReadableTime := formatTime("%Y-%m-%dT%H:%M:%S", field=@timestamp)
+    | Details := format("%s - %s", field=[ReadableTime, ImageFileName]);
+    
+    // Network connection detection
+    #event_simpleName=NetworkConnectIP4 ImageFileName=/.*(Dropbox|GoogleDrive|OneDrive|iCloudDrive|Mega|Box|PCloud|SyncClient)\.exe/i // Modify as needed
+    | Activity := "Network Connection"
+    | ReadableTime := formatTime("%Y-%m-%dT%H:%M:%S", field=@timestamp)
+    | Details := format("%s - %s:%s", field=[ReadableTime, RemoteAddressIP4, RemotePort]);
+    
+    // File written to cloud sync folders
+    #event_simpleName=FileWritten TargetFilePath=/.*(Dropbox|OneDrive|Google Drive|iCloud Drive|Mega|Box|Sync).*/i // Modify as needed
+    | FileSizeKB := unit:convert(Size, binary=true, to=k)
+    | Activity := "File Written to Cloud Folder"
+    | ReadableTime := formatTime("%Y-%m-%dT%H:%M:%S", field=@timestamp)
+    | Details := format("%s - %s (%,d KB)", field=[ReadableTime, FileName, FileSizeKB]);
+    
+    // Drop non-matching events
+    * | test(false)
+}
+// Aggregate by endpoint and activity type
+| groupBy([aid, ComputerName, Activity], function=[
+    count(as=EventCount),
+    collect(Details, limit=100)
+])
+| sort(EventCount, order=desc, limit=1000)
+
+// Filtering
+// e.g. | Activity != "Cloud Sync Process"
