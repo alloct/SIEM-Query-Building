@@ -1,0 +1,87 @@
+#repo="base_sensor" 
+(#event_simpleName="UserLogonFailed2" OR #event_simpleName="UserLogon")
+| in(field=LogonType, values=[2, 3, 8, 10])
+| case {
+    #event_simpleName="UserLogonFailed2" | _failed := 1 | _success := 0;
+    #event_simpleName="UserLogon" | _failed := 0 | _success := 1;
+    *;
+}
+// Decode LogonType for readability
+| case {
+    LogonType=2 | _logon_type_name := "Interactive";
+    LogonType=3 | _logon_type_name := "Network";
+    LogonType=8 | _logon_type_name := "NetworkCleartext";
+    LogonType=10 | _logon_type_name := "RDP";
+    * | _logon_type_name := format("Unknown_%s", field=LogonType);
+}
+// Normalize source identification
+| _source := coalesce(RemoteAddressIP4, WorkstationName, "LOCAL")
+| _target := ComputerName
+| _user := lower(UserName)
+| _domain := lower(LogonDomain)
+
+// Filter out service accounts and known users
+| !in(field=_user, values=["sample", "sample", "sample", "svc-sample", "support", "sample"])
+
+// Group by attack dimensions
+| groupBy([_target, _source, _user, _domain], function=[
+    sum(_failed, as=failed_attempts),
+    sum(_success, as=success_attempts),
+    min(@timestamp, as=first_attempt),
+    max(@timestamp, as=last_attempt),
+    collect([_logon_type_name], limit=100),
+    count(_logon_type_name, distinct=true, as=unique_logon_types)
+], limit=max)
+
+// Detection thresholds
+| failed_attempts >= 15
+| attack_duration := last_attempt - first_attempt
+| attack_duration_minutes := attack_duration / 60000
+
+// Convert timestamps to human-readable format
+| first_attempt_readable := formatTime("%Y-%m-%d %H:%M:%S %Z", field=first_attempt)
+| last_attempt_readable := formatTime("%Y-%m-%d %H:%M:%S %Z", field=last_attempt)
+| attack_duration_readable := formatDuration(attack_duration, precision=2)
+
+// Severity classification
+| case {
+    // Successful brute force
+    failed_attempts >= 10 AND success_attempts >= 1 | severity := "CRITICAL";
+    failed_attempts >= 5 AND success_attempts >= 1 | severity := "HIGH";
+    
+    // Multi-protocol attacks (sophisticated)
+    unique_logon_types >= 2 AND failed_attempts >= 5 | severity := "HIGH";
+    
+    // Failed attempts only
+    failed_attempts >= 10 AND success_attempts = 0 | severity := "MEDIUM";
+    failed_attempts >= 5 AND success_attempts = 0 | severity := "LOW";
+    
+    * | severity := "INFO";
+}
+
+// Attack characteristics
+| attempts_per_minute := (failed_attempts + success_attempts) / attack_duration_minutes
+| case {
+    attempts_per_minute > 10 | attack_speed := "FAST_AUTOMATED";
+    attempts_per_minute > 2 | attack_speed := "AUTOMATED";
+    attempts_per_minute > 0.5 | attack_speed := "SLOW";
+    * | attack_speed := "VERY_SLOW";
+}
+
+| select([
+    severity,
+    _target,
+    _source,
+    _user,
+    _domain,
+    failed_attempts,
+    success_attempts,
+    unique_logon_types,
+    _logon_type_name,
+    attack_speed,
+    attempts_per_minute,
+    attack_duration_readable,
+    first_attempt_readable,
+    last_attempt_readable
+])
+| sort(field=[severity, failed_attempts], order=[asc, desc], limit=1000)
