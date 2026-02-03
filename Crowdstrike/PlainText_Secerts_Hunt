@@ -1,0 +1,49 @@
+// Sensitive File Detection - Optimized Hunt
+// Detects files with credential-related names across file operations
+#event_simpleName=*
+// Use coalesce for safer field combination - handles null values properly
+| FullFile := coalesce([TargetFileName, ImageFileName])
+// Enhanced regex pattern with additional sensitive terms
+| FileName=/(?i)\b(passw(?:ord)?s?|pwd|secret|token|api[_-]?key|credential|cert(?:ificate)?|config|private|backup|dump|export|auth(?:entication)?|pem|pkcs|pfx|kdbx)\b[^\/\\]*\.(xlsx?|docx?|txt|csv|json|ya?ml|conf|ini|cnf|pem|der|p12|pkcs12|pfx|kdbx|ps1|bat|sh|cmd|log|bak|sql|env|properties|config)$/
+// Early join with aidmaster for machine context
+| join({
+    #data_source_name=aidmaster 
+    | groupBy([aid], function=selectFromMax(field=@timestamp, include=[Version, ProductType, MachineDomain, Continent, Country]))
+  }, 
+  field=aid, 
+  include=[Version, ProductType, MachineDomain, Continent, Country]
+)
+// Create enriched event details before grouping
+| ReadableTime := formatTime("%Y-%m-%d %H:%M:%S", field=@timestamp)
+// Add file path context
+| FilePath := coalesce([TargetDirectoryName, DirectoryName, "Unknown Path"])
+// Deduplicate and aggregate by file and host
+| groupBy([FullFile, aid, ComputerName], function=[
+    selectFromMax(field=@timestamp, include=[
+      #event_simpleName, 
+      ProductType, 
+      MachineDomain, 
+      FilePath,
+      ReadableTime,
+      Continent,
+      Country
+    ]),
+    count(as=EventCount)
+  ]
+)
+// Sort by most recent activity
+| sort(field=@timestamp, order=desc, limit=1000)
+// Final table with key hunting context
+| table([
+  ReadableTime,
+  MachineDomain,
+  ComputerName,
+  #event_simpleName,
+  FullFile,
+  FilePath,
+  EventCount,
+  ProductType,
+  Continent,
+  Country,
+  aid
+], limit=1000)
