@@ -1,0 +1,29 @@
+#event_simpleName = /.*FileWritten.*/
+| IsOnRemovableDisk = "1"
+// Extracting Device ID and the Volume name from the path
+| regex("(?<DestinationVolume>\\\\Device\\\\HarddiskVolume\d+)", field=TargetFileName, strict=false)
+
+| groupBy([aid, ComputerName, UserName, ContextBaseFileName, DiskParentDeviceInstanceId, DestinationVolume], function=[
+    count(as=totalFilesCount),
+    max(Size, as=largestFileBytes),
+    min(Size, as=smallestFileBytes),
+    sum(Size, as=totalTransferredBytes),
+    collect([FileName], limit=5)
+  ])
+
+// Conversions
+| largestFileMB      := largestFileBytes / 1024.0 / 1024.0
+| smallestFileMB     := smallestFileBytes / 1024.0 / 1024.0
+| totalTransferredGB := totalTransferredBytes / 1024.0 / 1024.0 / 1024.0
+
+// Rounding 
+| totalTransferredGB := format("%.2f", field=totalTransferredGB)
+| largestFileMB      := format("%.2f", field=largestFileMB)
+| smallestFileMB     := format("%.2f", field=smallestFileMB)
+
+// Filter for high-volume activity
+| totalFilesCount > 100 or totalTransferredGB > 0.5
+
+| rename(DiskParentDeviceInstanceId, as=USB_Device_ID)
+| drop([largestFileBytes, smallestFileBytes, totalTransferredBytes])
+| sort(totalFilesCount, order=desc)
